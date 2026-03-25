@@ -281,6 +281,29 @@ function OutgoingPanel() {
   const [callStatus, setCallStatus] = useState(null);
   const [logs, setLogs] = useState(MOCK_OUTGOING);
   const [ongoingCalls, setOngoingCalls] = useState(ONGOING_CALLS_SEED);
+  const [selectedLanguage, setSelectedLanguage] = useState('en'); // 'en' or 'te'
+
+  const startLiveAssistant = async () => {
+    if (!phone) return toast.error('Please enter a phone number.');
+    setCallStatus('calling');
+    try {
+      await axios.post('/api/calls/voice-assistant/start', { 
+        to: phone, 
+        language: selectedLanguage 
+      });
+      toast.success(`Live AI Assistant started (${selectedLanguage === 'en' ? 'English' : 'Telugu'})`);
+      const newOngoing = {
+        id: 'o' + Date.now(), name: clientName || 'Live Assistant Call', avatar: '🤖',
+        phone, slot: 'Interactive AI Session', since: '0:00',
+      };
+      setOngoingCalls(prev => [...prev, newOngoing]);
+      setCallStatus('in-progress');
+      setTimeout(() => setCallStatus(null), 3000);
+    } catch (e) {
+      setCallStatus(null);
+      toast.error('Failed to start Live AI: ' + e.message);
+    }
+  };
 
   const script = clientName && slot
     ? `Hello ${clientName}, this is a reminder call from VoxAI. Your appointment slot is confirmed for ${slot}. ${notes ? 'Note: ' + notes : ''} Please reply 1 to confirm or 2 to reschedule. Thank you!`
@@ -288,12 +311,24 @@ function OutgoingPanel() {
 
   const makeRecallCall = async () => {
     if (!phone || !clientName || !slot) return toast.error('Fill in all required fields.');
-    setCallStatus('calling');
+    setCallStatus('generating-voice');
     try {
-      await axios.post('/api/calls/make', { to: phone, script });
+      // 1. Try to generate Murf AI Human Voice
+      let voiceUrl = null;
+      try {
+        const { data: ttsRes } = await axios.post('/api/tts/murf', { text: script });
+        voiceUrl = ttsRes.audioUrl;
+        setCallStatus('calling');
+      } catch (err) {
+        console.warn('Murf AI generation failed, falling back to standard voice');
+        setCallStatus('calling');
+      }
+
+      // 2. Make the call (using either Murf Play or Twilio Say)
+      await axios.post('/api/calls/make', { to: phone, script, voiceUrl });
       setCallStatus('in-progress');
       toast.success('Confirmation call sent!');
-      // Move to ongoing queue immediately
+      
       const newOngoing = {
         id: 'o' + Date.now(), name: clientName, avatar: '📞',
         phone, slot, since: '0:00',
@@ -304,7 +339,8 @@ function OutgoingPanel() {
     } catch (e) {
       setCallStatus(null);
       if (e.response?.data?.needsKey) {
-        toast('Twilio not configured — logged as demo confirmed.', { icon: 'ℹ️' });
+        toast('Twilio not configured — logged as demo.', { icon: 'ℹ️' });
+        // Demo fallback
         const newOngoing = {
           id: 'o' + Date.now(), name: clientName, avatar: '📞',
           phone, slot, since: '0:00',
@@ -361,26 +397,50 @@ function OutgoingPanel() {
             style={{ width: '100%', padding: '12px 16px', color: '#fff', border: '1px solid rgba(255,255,255,0.08)', outline: 'none', borderRadius: 10, fontSize: 14 }} />
         </div>
 
+        {/* Language Selector */}
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '0 4px' }}>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 600 }}>VOICE LANGUAGE:</span>
+          <button 
+            onClick={() => setSelectedLanguage('en')}
+            style={{ padding: '6px 12px', borderRadius: 20, fontSize: 11, border: '1px solid', borderColor: selectedLanguage === 'en' ? 'var(--primary)' : 'rgba(255,255,255,0.1)', background: selectedLanguage === 'en' ? 'rgba(255,184,0,0.1)' : 'transparent', color: selectedLanguage === 'en' ? 'var(--primary)' : '#888', cursor: 'pointer' }}
+          >
+            🇺🇸 English
+          </button>
+          <button 
+            onClick={() => setSelectedLanguage('te')}
+            style={{ padding: '6px 12px', borderRadius: 20, fontSize: 11, border: '1px solid', borderColor: selectedLanguage === 'te' ? 'var(--primary)' : 'rgba(255,255,255,0.1)', background: selectedLanguage === 'te' ? 'rgba(255,184,0,0.1)' : 'transparent', color: selectedLanguage === 'te' ? 'var(--primary)' : '#888', cursor: 'pointer' }}
+          >
+            🇮🇳 Telugu
+          </button>
+        </div>
+
         {/* AI Script Preview */}
         <div style={{ padding: 16, borderRadius: 12, background: 'rgba(255,184,0,0.04)', border: '1px solid rgba(255,184,0,0.1)' }}>
-          <p style={{ fontSize: 11, color: 'var(--primary)', letterSpacing: 1, marginBottom: 8 }}>AI SCRIPT PREVIEW</p>
+          <p style={{ fontSize: 11, color: 'var(--primary)', letterSpacing: 1, marginBottom: 8 }}>AI SCRIPT / CONVERSATION PREVIEW</p>
           <p style={{ fontSize: 14, color: clientName && slot ? '#EBEBEB' : 'var(--text-muted)', lineHeight: 1.6 }}>{script}</p>
         </div>
 
-        <button
-          onClick={makeRecallCall}
-          disabled={callStatus === 'calling' || callStatus === 'in-progress'}
-          className="btn-primary"
-          style={{ padding: '14px', fontSize: 16, borderRadius: 12, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 10 }}
-        >
-          {callStatus === 'calling' ? '⏳ Connecting...' :
-            callStatus === 'in-progress' ? (
-              <>
-                <motion.div style={{ width: 10, height: 10, borderRadius: '50%', background: '#050505' }} animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 0.8 }} />
-                Call In Progress...
-              </>
-            ) : '📞 Send Confirmation Call'}
-        </button>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <button
+            onClick={makeRecallCall}
+            disabled={callStatus !== null}
+            className="btn-primary"
+            style={{ padding: '14px', fontSize: 14, borderRadius: 12, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}
+          >
+            {callStatus === 'generating-voice' ? '⏳ Generating...' :
+             callStatus === 'calling' ? '⏳ Connecting...' :
+             callStatus === 'in-progress' ? 'Running...' : '📞 Simple Reminder'}
+          </button>
+          
+          <button
+            onClick={startLiveAssistant}
+            disabled={callStatus !== null}
+            className="glass"
+            style={{ padding: '14px', fontSize: 14, borderRadius: 12, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, border: '1px solid var(--primary)', color: 'var(--primary)' }}
+          >
+            🎙️ Start Live AI conversation
+          </button>
+        </div>
       </div>
 
       {/* ── Ongoing Outgoing Calls ── */}
