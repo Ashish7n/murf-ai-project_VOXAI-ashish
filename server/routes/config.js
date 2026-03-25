@@ -15,6 +15,10 @@ router.get('/status', (req, res) => {
     TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_AUTH_TOKEN !== 'your_twilio_auth_token_here',
     TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER && process.env.TWILIO_PHONE_NUMBER !== 'your_twilio_phone_number_here',
     GOOGLE_TRANSLATE_API_KEY: process.env.GOOGLE_TRANSLATE_API_KEY && process.env.GOOGLE_TRANSLATE_API_KEY !== 'your_google_translate_api_key_here',
+    GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID && !process.env.GOOGLE_CLIENT_ID.includes('your_'),
+    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET && !process.env.GOOGLE_CLIENT_SECRET.includes('your_'),
+    GOOGLE_CLIENT_ID_RAW: process.env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET_RAW: process.env.GOOGLE_CLIENT_SECRET,
   };
   res.json(keys);
 });

@@ -11,9 +11,12 @@ export default function TaskAssistant() {
   const [userEmail, setUserEmail] = useState(localStorage.getItem('voxai_user_email') || '');
   const [userPhone, setUserPhone] = useState(localStorage.getItem('voxai_user_phone') || '');
   const [googleToken, setGoogleToken] = useState(JSON.parse(localStorage.getItem('voxai_google_token')) || null);
+  const [isConfigured, setIsConfigured] = useState({ GOOGLE_CLIENT_ID: true });
+  const [isLocalMode, setIsLocalMode] = useState(false);
   const recognitionRef = useRef(null);
 
   useEffect(() => {
+    checkConfig();
     fetchTasks();
     const socket = io('http://localhost:5000');
     socket.on('reminder', ({ task }) => {
@@ -25,11 +28,32 @@ export default function TaskAssistant() {
     return () => socket.disconnect();
   }, []);
 
+  const checkConfig = async () => {
+    try {
+      const { data } = await axios.get('/api/config/status');
+      setIsConfigured(data);
+    } catch (e) {
+      console.warn('Config check failed');
+    }
+  };
+
   const fetchTasks = async () => {
     try {
-      const { data } = await axios.get('/api/tasks');
-      setTasks(data);
-    } catch (e) { toast.error('Failed to load tasks'); }
+      const { data, status } = await axios.get('/api/tasks');
+      // If server returns data (even empty array), it's a successful backend hit
+      setTasks(data || []);
+      localStorage.setItem('voxai_tasks_cache', JSON.stringify(data || []));
+      setIsLocalMode(false);
+    } catch (e) { 
+      console.warn('Backend tasks failed, launching Lifeboat');
+      loadFromLocal();
+    }
+  };
+
+  const loadFromLocal = () => {
+    const cached = JSON.parse(localStorage.getItem('voxai_tasks_cache') || '[]');
+    setTasks(cached);
+    setIsLocalMode(true);
   };
 
   useEffect(() => {
@@ -71,37 +95,66 @@ export default function TaskAssistant() {
     try {
       const { data: parsed } = await axios.post('/api/tasks/parse', { text });
       const taskData = {
-        ...parsed,
+        title: parsed.title,
+        reminderAt: parsed.reminderAt,
+        category: parsed.category,
         userEmail: userEmail,
         userPhone: userPhone,
-        isImportant: false, // Default to not important for voice commands initially
-        googleToken: googleToken
+        isImportant: false,
+        googleToken: googleToken,
+        _id: Date.now().toString(), // Temp ID for local
+        createdAt: new Date()
       };
-      await axios.post('/api/tasks', taskData);
-      toast.success(`Task scheduled: ${parsed.title}`, { id: 'cmd' });
+
+      try {
+        await axios.post('/api/tasks', taskData);
+        toast.success(`Task scheduled: ${parsed.title}`, { id: 'cmd' });
+      } catch (err) {
+        // Backend failed, save locally
+        const currentTasks = JSON.parse(localStorage.getItem('voxai_tasks_cache') || '[]');
+        const updated = [taskData, ...currentTasks];
+        localStorage.setItem('voxai_tasks_cache', JSON.stringify(updated));
+        setTasks(updated);
+        setIsLocalMode(true);
+        toast.success(`Task saved locally: ${parsed.title}`, { id: 'cmd' });
+      }
       fetchTasks();
       setTranscript('');
     } catch (e) {
-      toast.error('Failed to assign task', { id: 'cmd' });
+      toast.error('Failed to parse voice command', { id: 'cmd' });
     }
   };
 
   const connectGoogle = async () => {
+    if (!isConfigured.GOOGLE_CLIENT_ID) {
+      toast.error('Google OAuth not configured in .env', { duration: 5000 });
+      return;
+    }
+
     try {
       const { data } = await axios.get('/api/auth/google/url');
       const authWindow = window.open(data.url, '_blank', 'width=500,height=600');
       
-      // Since we don't have a real backend callback redirect captured here, 
-      // we'll ask the user to paste the code for this demo purpose, or 
-      // usually, OAuth would redirect back to your site with a ?code= parameter.
-      const code = prompt('Please enter the authorization code from Google:');
-      if (code) {
-        const res = await axios.post('/api/auth/google/callback', { code });
-        setGoogleToken(res.data);
-        localStorage.setItem('voxai_google_token', JSON.stringify(res.data));
-        toast.success('Google Calendar connected!');
-      }
-    } catch (e) { toast.error('Connection failed'); }
+      // Listen for the success message from the popup
+      const handleMessage = (event) => {
+        if (event.data?.type === 'GOOGLE_AUTH_SUCCESS') {
+          const { tokens, email } = event.data;
+          
+          setGoogleToken(tokens);
+          localStorage.setItem('voxai_google_token', JSON.stringify(tokens));
+          
+          if (email) {
+            setUserEmail(email);
+            localStorage.setItem('voxai_user_email', email);
+          }
+          
+          toast.success('Google Calendar connected!');
+          window.removeEventListener('message', handleMessage);
+        }
+      };
+
+      window.addEventListener('message', handleMessage);
+    } catch (e) { toast.error('Connection failed: Invalid Client Configuration'); }
   };
 
   const saveEmail = (e) => {
@@ -120,7 +173,14 @@ export default function TaskAssistant() {
     try {
       await axios.delete(`/api/tasks/${id}`);
       fetchTasks();
-    } catch (e) { toast.error('Failed to delete task'); }
+    } catch (e) { 
+      // Fallback: Delete from local storage
+      const currentTasks = JSON.parse(localStorage.getItem('voxai_tasks_cache') || '[]');
+      const updated = currentTasks.filter(t => t._id !== id);
+      localStorage.setItem('voxai_tasks_cache', JSON.stringify(updated));
+      setTasks(updated);
+      toast.success('Task removed from local storage');
+    }
   };
 
   return (
@@ -129,6 +189,11 @@ export default function TaskAssistant() {
         <div>
           <h1 className="text-gradient" style={{ fontSize: '3rem', marginBottom: 12 }}>Task Assistant</h1>
           <p style={{ color: 'var(--text-muted)', fontSize: 18 }}>Schedule your day using voice commands and sync to your world.</p>
+          {isLocalMode && (
+            <div style={{ marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 16px', background: 'rgba(255,184,0,0.1)', border: '1px solid rgba(255,184,0,0.2)', borderRadius: 20, fontSize: 12, color: 'var(--primary)', fontWeight: 600 }}>
+              🚀 TASK LIFEBOAT ACTIVE (Local Mode)
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Email Box */}
@@ -235,9 +300,32 @@ export default function TaskAssistant() {
           <div className="glass" style={{ marginTop: 20, padding: 32, textAlign: 'center', background: 'rgba(255, 184, 0, 0.05)' }}>
             <h4 style={{ marginBottom: 12, fontSize: 15 }}>External Integrations</h4>
             <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>Connect to your Google account to automatically sync tasks to your calendar.</p>
-            {googleToken ? (
-              <div style={{ color: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-                <span style={{ fontSize: 20 }}>✅</span> Google Calendar Connected
+            {!isConfigured.GOOGLE_CLIENT_ID || !isConfigured.GOOGLE_CLIENT_SECRET || (isConfigured.GOOGLE_CLIENT_ID_RAW === isConfigured.GOOGLE_CLIENT_SECRET_RAW && isConfigured.GOOGLE_CLIENT_ID_RAW !== undefined) ? (
+              <div style={{ padding: '12px 20px', background: 'rgba(255,0,0,0.05)', border: '1px solid rgba(255,0,0,0.1)', borderRadius: 12, display: 'inline-block' }}>
+                <span style={{ color: '#f87171', fontSize: 13, fontWeight: 600 }}>⚠️ Google OAuth Not Fully Configured</span>
+                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+                  {isConfigured.GOOGLE_CLIENT_ID && isConfigured.GOOGLE_CLIENT_ID_RAW === isConfigured.GOOGLE_CLIENT_SECRET_RAW 
+                    ? "Error: Your ID and Secret are identical. Please check line 11 in .env" 
+                    : "Add both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to your .env file."}
+                </p>
+              </div>
+            ) : googleToken ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div style={{ color: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>✅</span> Google Calendar Connected
+                </div>
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                  <a href="https://calendar.google.com" target="_blank" rel="noreferrer" className="btn-ghost" style={{ fontSize: 13, textDecoration: 'none', color: 'var(--primary)', border: '1px solid var(--primary)', padding: '8px 16px', borderRadius: 8 }}>
+                    Open Calendar 📅
+                  </a>
+                  <button onClick={() => {
+                    localStorage.removeItem('voxai_google_token');
+                    setGoogleToken(null);
+                    toast.success('Disconnected from Google');
+                  }} className="btn-ghost" style={{ fontSize: 13, color: '#f87171', border: '1px solid #f87171', padding: '8px 16px', borderRadius: 8 }}>
+                    Disconnect 🔌
+                  </button>
+                </div>
               </div>
             ) : (
               <button onClick={connectGoogle} className="btn-primary" style={{ padding: '12px 32px', fontSize: 14 }}>

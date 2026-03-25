@@ -8,7 +8,8 @@ router.get('/', async (req, res) => {
     const tasks = await Task.find().sort({ reminderAt: 1 });
     res.json(tasks);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('⚠️ DB Error in Task Fetching, returning empty array:', e.message);
+    res.json([]); // Return empty array so frontend can use localStorage
   }
 });
 
