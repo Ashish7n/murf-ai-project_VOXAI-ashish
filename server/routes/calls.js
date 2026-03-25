@@ -72,14 +72,18 @@ router.post('/voice-assistant/intro', async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   
   try {
-    // Generate Murf audio for greeting
+    // Murf doesn't support Telugu for this key, skip for 'te'
+    if (lang === 'te') {
+      throw new Error('Skip Murf for Telugu');
+    }
     const murfRes = await axios.post('https://api.murf.ai/v1/speech/generate', {
       text: greet, voiceId: voice, modelVersion: 'GEN2'
     }, { headers: { 'api-key': process.env.MURF_API_KEY } });
     
     twiml.play(murfRes.data.audioFile);
   } catch (e) {
-    twiml.say({ voice: 'Polly.Aditi', language: lang === 'te' ? 'te-IN' : 'en-IN' }, greet);
+    // For Telugu, Shruti is the standard female voice.
+    twiml.say({ voice: 'Polly.Shruti', language: 'te-IN' }, greet);
   }
 
   const gather = twiml.gather({
@@ -112,13 +116,15 @@ router.post('/voice-assistant/process', async (req, res) => {
     const aiText = result.response.text().trim();
 
     // 2. Generate Human-like Audio via Murf
-    const voiceId = lang === 'te' ? 'te-IN-shobha' : 'en-IN-amit';
-    const murfRes = await axios.post('https://api.murf.ai/v1/speech/generate', {
-      text: aiText, voiceId, modelVersion: 'GEN2'
-    }, { headers: { 'api-key': process.env.MURF_API_KEY } });
-
-    // 3. Play response and gather next input
-    twiml.play(murfRes.data.audioFile);
+    if (lang === 'te') {
+       twiml.say({ voice: 'Polly.Shruti', language: 'te-IN' }, aiText);
+    } else {
+      const voiceId = 'en-IN-amit';
+      const murfRes = await axios.post('https://api.murf.ai/v1/speech/generate', {
+        text: aiText, voiceId, modelVersion: 'GEN2'
+      }, { headers: { 'api-key': process.env.MURF_API_KEY } });
+      twiml.play(murfRes.data.audioFile);
+    }
     twiml.gather({
       input: 'speech',
       action: `/api/calls/voice-assistant/process?lang=${lang}`,

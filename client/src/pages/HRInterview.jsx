@@ -2,14 +2,18 @@ import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
+import { speakWithFallback } from '../utils/speech';
 
 export default function HRInterview() {
   const [isRecording, setIsRecording] = useState(false);
   const [transcript, setTranscript] = useState('');
+  const [interimTranscript, setInterimTranscript] = useState('');
   const [question, setQuestion] = useState('Select your profile and click Start Interview.');
   const [aiFeedback, setAiFeedback] = useState(null);
   const [scores, setScores] = useState({ accuracy: 0, confidence: 0, communication: 0, overall: 0 });
   const [isLoading, setIsLoading] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [aiSpeaking, setAiSpeaking] = useState(false);
 
   // Selection State
   const [role, setRole] = useState('Frontend');
@@ -61,16 +65,28 @@ export default function HRInterview() {
 
       recognition.onresult = (e) => {
         let finalTrans = '';
+        let interimTrans = '';
+        setIsUserSpeaking(true);
+        clearTimeout(window.speechTimeout);
+        window.speechTimeout = setTimeout(() => setIsUserSpeaking(false), 1000);
+
         for (let i = e.resultIndex; i < e.results.length; ++i) {
           if (e.results[i].isFinal) finalTrans += e.results[i][0].transcript;
+          else interimTrans += e.results[i][0].transcript;
         }
+        
         if (finalTrans) {
           setTranscript((prev) => prev + ' ' + finalTrans);
+          setInterimTranscript('');
+        } else {
+          setInterimTranscript(interimTrans);
         }
       };
 
-      recognition.onerror = () => setIsRecording(false);
-      recognition.onend = () => { if (isRecording) recognition.start(); }; // Keep alive
+      recognition.onspeechstart = () => setIsUserSpeaking(true);
+      recognition.onspeechend = () => setIsUserSpeaking(false);
+      recognition.onerror = () => { setIsRecording(false); setIsUserSpeaking(false); };
+      recognition.onend = () => { if (isRecording) recognition.start(); }; 
       recognitionRef.current = recognition;
     } else {
       toast.error('Browser does not support Speech Recognition');
@@ -79,22 +95,25 @@ export default function HRInterview() {
     return () => { if (recognitionRef.current) recognitionRef.current.stop(); };
   }, [isRecording]);
 
-  const toggleRecording = () => {
-    if (isRecording) {
+  const toggleRecording = (forceStart = false) => {
+    if (isRecording && !forceStart) {
       recognitionRef.current?.stop();
       setIsRecording(false);
+      setIsUserSpeaking(false);
+      setInterimTranscript('');
 
       // Delay evaluation slightly to allow last transcript fragments to arrive
       setTimeout(() => {
         setTranscript(prev => {
           const finalTranscript = prev.trim();
           if (finalTranscript.length > 2) evaluateAnswer(finalTranscript);
-          else toast('Answer too short to evaluate', { icon: '⚠️' });
+          else toast('No response detected', { icon: '⚠️' });
           return prev;
         });
-      }, 800);
+      }, 1000);
     } else {
       setTranscript('');
+      setInterimTranscript('');
       setAiFeedback(null);
       setScores({ accuracy: 0, confidence: 0, communication: 0, overall: 0 });
       recognitionRef.current?.start();
@@ -104,13 +123,24 @@ export default function HRInterview() {
 
 
   const speak = async (text, voicePreset = 'professional') => {
+    setAiSpeaking(true);
     try {
       const res = await axios.post('/api/voice/generate', { text, preset: voicePreset });
       const audio = new Audio(res.data.audioUrl);
+      audio.onended = () => {
+        setAiSpeaking(false);
+        // Auto-start mic after AI finishes
+        if (!showFinalAnalysis) toggleRecording(true); 
+      };
       audio.play();
     } catch (e) {
-      const u = new SpeechSynthesisUtterance(text);
-      window.speechSynthesis.speak(u);
+      // Fallback: Browser TTS
+      speakWithFallback(text, 'en');
+      // For browser TTS, we approximate end time or just wait
+      setTimeout(() => {
+        setAiSpeaking(false);
+        if (!showFinalAnalysis) toggleRecording(true);
+      }, text.length * 80); // Rough estimate for browser TTS duration
     }
   };
 
@@ -133,7 +163,7 @@ export default function HRInterview() {
     getNextQuestion(true);
   };
 
-  const getNextQuestion = async (isFirst = false) => {
+  const getNextQuestion = async (isFirst = false, returnOnly = false) => {
     if (!isFirst && currentQuestionNumber >= 10) {
       setShowFinalAnalysis(true);
       return;
@@ -142,15 +172,19 @@ export default function HRInterview() {
     setIsLoading(true);
     try {
       const { data } = await axios.get(`/api/interview/question?role=${role}&topic=${topic}&level=${level}`);
+      if (returnOnly) {
+         setIsLoading(false);
+         return data.question;
+      }
       setQuestion(data.question);
       setTranscript('');
+      setInterimTranscript('');
       setAiFeedback(null);
       setScores({ accuracy: 0, confidence: 0, communication: 0, overall: 0 });
       if (data.isLifeboat) setIsLifeboatMode(true);
-      if (!isFirst) setCurrentQuestionNumber(prev => prev + 1);
       await speak(data.question);
     } catch (e) {
-      toast.error('Failed to generate question. Please check Gemini API key.');
+      toast.error('Failed to generate question.');
     }
     setIsLoading(false);
   };
@@ -170,18 +204,25 @@ export default function HRInterview() {
       setAiFeedback(data.feedback);
       setScores(data.scores);
       if (data.isLifeboat) setIsLifeboatMode(true);
-
-      // Save results
       setSessionResults(prev => [...prev, { question, answer: answerToEvaluate, evaluation: data }]);
-
       toast.success('Evaluation complete', { id: 'eval' });
-      await speak(data.feedback, 'female'); // AI evaluator voice
 
-      // Wait 3 seconds then go to next question automatically
-      setTimeout(() => {
-        if (currentQuestionNumber < 10) getNextQuestion();
-        else setShowFinalAnalysis(true);
-      }, 5000);
+      // CHAINING: Get next question immediately and speak combined
+      if (currentQuestionNumber < 10) {
+        const nextQ = await getNextQuestion(false, true); // Fetch next question silently
+        const combinedText = `${data.feedback}. Let's move to the next one. ${nextQ}`;
+        
+        // Update states for next round
+        setQuestion(nextQ);
+        setTranscript('');
+        setInterimTranscript('');
+        setCurrentQuestionNumber(prev => prev + 1);
+        
+        await speak(combinedText, 'female');
+      } else {
+        await speak(data.feedback, 'female');
+        setTimeout(() => setShowFinalAnalysis(true), 4000);
+      }
 
     } catch (e) {
       toast.error('Evaluation failed');
@@ -289,8 +330,11 @@ export default function HRInterview() {
                 👤
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: '14px', textTransform: 'uppercase', letterSpacing: 2, color: 'var(--primary)', marginBottom: 12 }}>AI INTERVIEWER</div>
-                <h2 style={{ fontSize: 26, lineHeight: 1.4, color: '#fff' }}>"{question}"</h2>
+                <div style={{ fontSize: '14px', textTransform: 'uppercase', letterSpacing: 2, color: aiSpeaking ? 'var(--primary)' : 'var(--text-muted)', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  {aiSpeaking ? 'AI INTERVIEWER IS SPEAKING...' : 'AI INTERVIEWER'}
+                  {aiSpeaking && <div className="pulse-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--primary)' }} />}
+                </div>
+                <h2 style={{ fontSize: 26, lineHeight: 1.4, color: aiSpeaking ? '#fff' : 'rgba(255,255,255,0.5)', transition: 'all 0.4s' }}>"{question}"</h2>
               </div>
             </motion.div>
 
@@ -298,21 +342,54 @@ export default function HRInterview() {
             <div className="glass" style={{ flex: 1, padding: 32, display: 'flex', flexDirection: 'column', position: 'relative' }}>
               <div style={{ fontSize: '14px', color: 'var(--purple)', marginBottom: 24 }}>YOUR RESPONSE</div>
 
-              <div style={{ flex: 1, fontSize: 20, lineHeight: 1.6, color: transcript ? '#EBEBEB' : 'rgba(235,235,235,0.3)' }}>
-                {transcript || (isReadyPhase ? 'Click the button on the right to start...' : 'Start speaking your answer...')}
+              <div style={{ flex: 1, fontSize: 20, lineHeight: 1.6, color: (transcript || interimTranscript) ? '#EBEBEB' : 'rgba(235,235,235,0.3)' }}>
+                {transcript}
+                <span style={{ opacity: 0.6 }}>{interimTranscript}</span>
+                {!(transcript || interimTranscript) && (isReadyPhase ? 'Click the button on the right to start...' : 'Start speaking your answer...')}
                 {isRecording && <span style={{ animation: 'pulse-ring 1s infinite' }}> |</span>}
               </div>
 
               {!isReadyPhase && (
-                <div style={{ display: 'flex', justifyContent: 'center', marginTop: 24 }}>
-                  <button
-                    onClick={toggleRecording}
-                    className={`mic-btn ${isRecording ? 'active' : 'inactive'}`}
-                    disabled={isLoading}
-                  >
-                    {isRecording && <div className="pulse-ring" style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid #ff0060' }} />}
-                    <span style={{ fontSize: 32, zIndex: 2 }}>{isRecording ? '⏹' : '🎤'}</span>
-                  </button>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 24 }}>
+                    <button
+                      onClick={() => toggleRecording()}
+                      className={`mic-btn ${isRecording ? 'active' : 'inactive'} ${isUserSpeaking ? 'speaking' : ''}`}
+                      disabled={isLoading || aiSpeaking}
+                      style={{ 
+                        position: 'relative',
+                        scale: isUserSpeaking ? 1.1 : 1,
+                        boxShadow: isUserSpeaking ? '0 0 40px rgba(255, 0, 96, 0.4)' : 'none',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      {isRecording && <div className="pulse-ring" style={{ position: 'absolute', inset: -10, borderRadius: '50%', border: '2px solid #ff0060', opacity: isUserSpeaking ? 1 : 0.3 }} />}
+                      {isUserSpeaking && (
+                         <div style={{ position: 'absolute', inset: -20, display: 'flex', gap: 4, alignItems: 'center', justifyContent: 'center' }}>
+                            {[1,2,3,4,5].map(i => (
+                              <motion.div key={i} animate={{ height: [10, 30, 10] }} transition={{ repeat: Infinity, duration: 0.5, delay: i * 0.1 }} style={{ width: 3, background: '#ff0060', borderRadius: 2 }} />
+                            ))}
+                         </div>
+                      )}
+                      <span style={{ fontSize: 32, zIndex: 2 }}>{isRecording ? '⏹' : '🎤'}</span>
+                    </button>
+                    
+                    {/* Submit Button: Persistent during answering phase */}
+                    <button 
+                      onClick={() => { if(isRecording) toggleRecording(); else evaluateAnswer(); }} 
+                      disabled={isLoading || aiSpeaking || (transcript.length < 5 && !isRecording)}
+                      className="btn-primary" 
+                      style={{ 
+                        padding: '12px 24px', borderRadius: 8, background: 'var(--primary)', color: '#000', fontWeight: 700,
+                        opacity: (isLoading || aiSpeaking) ? 0.3 : 1
+                      }}
+                    >
+                      {isRecording ? 'Submit Answer 🚀' : 'Evaluate Response ✨'}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 13, color: isUserSpeaking ? '#ff0060' : 'var(--text-muted)', fontWeight: 600, letterSpacing: 1 }}>
+                    {isRecording ? (isUserSpeaking ? 'SPEAKING DETECTED' : 'LISTENING...') : 'MIC OFF'}
+                  </div>
                 </div>
               )}
             </div>
@@ -355,6 +432,9 @@ export default function HRInterview() {
                         style={{ marginTop: 40, padding: 20, background: 'rgba(255, 184, 0, 0.05)', borderRadius: 16, border: '1px solid rgba(255, 184, 0, 0.1)' }}>
                         <h4 style={{ color: 'var(--primary)', fontSize: 14, marginBottom: 8 }}>INTERVIEWER NOTES</h4>
                         <p style={{ fontSize: 14, lineHeight: 1.5 }}>{aiFeedback}</p>
+                        <button onClick={() => getNextQuestion()} disabled={isLoading || currentQuestionNumber >= 10} className="btn-primary" style={{ marginTop: 16, width: '100%', padding: '10px', borderRadius: 8, fontSize: 13 }}>
+                           Skip to Next Question ➔
+                        </button>
                       </motion.div>
                     )}
                   </AnimatePresence>

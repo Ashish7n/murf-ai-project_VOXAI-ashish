@@ -3,6 +3,7 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { useDropzone } from 'react-dropzone';
+import { speakWithFallback } from '../utils/speech';
 
 const languages = [
   { id: 'en', label: 'English' }, 
@@ -81,6 +82,13 @@ export default function Translator() {
   const [isUploading, setIsUploading] = useState(false);
   const [lifeboatWarning, setLifeboatWarning] = useState('');
 
+  // Re-translate if language changes and we have text
+  useEffect(() => {
+    if (originalText && !isUploading) {
+      translateText();
+    }
+  }, [sourceLang, targetLang]);
+
   const onDrop = useCallback(async (acceptedFiles) => {
     const file = acceptedFiles[0];
     if (!file) return;
@@ -95,12 +103,20 @@ export default function Translator() {
       });
       setOriginalText(data.text);
       toast.success('File processed successfully!');
+      
+      if (data.text.length > 10000) {
+        toast('Large file detected. Generating summary first...', { icon: '🤖' });
+        summarizeText(data.text);
+      } else {
+        // Automation: Translate immediately for normal sizes
+        translateText(data.text);
+      }
     } catch (e) {
       toast.error('Failed to process file');
     } finally {
       setIsUploading(false);
     }
-  }, []);
+  }, [targetLang, sourceLang]); // Include dependencies for automation
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
     onDrop,
@@ -111,17 +127,20 @@ export default function Translator() {
     multiple: false
   });
 
-  const translateText = async () => {
-    if (!originalText) return toast.error('Enter some text first');
+  const translateText = async (textToUse) => {
+    const text = (typeof textToUse === 'string' ? textToUse : originalText);
+    if (!text) return toast.error('Enter some text first');
     setIsTranslating(true);
     try {
       const { data } = await axios.post('/api/translate', { 
-        text: originalText, 
+        text: text, 
         sourceLang, targetLang 
       });
       setTranslatedText(data.translatedText);
       toast.success('Translated successfully');
-      setLifeboatWarning(''); // Clear any previous warnings
+      setLifeboatWarning('');
+      // Automation: Summarize immediately
+      summarizeText(data.translatedText);
     } catch (e) {
       toast.error('Translation failed');
     } finally {
@@ -129,13 +148,13 @@ export default function Translator() {
     }
   };
 
-  const summarizeText = async () => {
-    if (!translatedText && !originalText) return toast.error('No text to summarize');
+  const summarizeText = async (textToUse) => {
+    const text = (typeof textToUse === 'string' ? textToUse : translatedText || originalText);
+    if (!text) return toast.error('No text to summarize');
     setIsSummarizing(true);
     setLifeboatWarning('');
     try {
-      const textToSummarize = translatedText || originalText;
-      const { data } = await axios.post('/api/translate/summarize', { text: textToSummarize });
+      const { data } = await axios.post('/api/translate/summarize', { text: text });
       
       if (data.isLifeboat) {
         setLifeboatWarning(data.warning || 'AI Quota Exceeded. Using local summary.');
@@ -164,10 +183,7 @@ export default function Translator() {
       toast.success('Translation audio generated');
     } catch (e) {
       if (e.response?.data?.fallback === 'browser') {
-        toast('Using browser speaker (Murf error)', { icon: '📢' });
-        const speech = new SpeechSynthesisUtterance(translatedText);
-        speech.lang = targetLang === 'hi' ? 'hi-IN' : targetLang === 'te' ? 'te-IN' : targetLang === 'ta' ? 'ta-IN' : 'en-US';
-        window.speechSynthesis.speak(speech);
+        speakWithFallback(translatedText, targetLang);
       } else {
         toast.error('Audio generation failed');
       }
@@ -189,11 +205,7 @@ export default function Translator() {
       toast.success('Summary audio generated');
     } catch (e) {
       if (e.response?.data?.fallback === 'browser') {
-        const textToSpeak = summaryPoints.join('. ');
-        toast('Using browser speaker (Murf error)', { icon: '📢' });
-        const speech = new SpeechSynthesisUtterance(textToSpeak);
-        speech.lang = targetLang === 'hi' ? 'hi-IN' : targetLang === 'te' ? 'te-IN' : targetLang === 'ta' ? 'ta-IN' : 'en-US';
-        window.speechSynthesis.speak(speech);
+        speakWithFallback(summaryPoints.join('. '), targetLang);
       } else {
         toast.error('Audio generation failed');
       }
