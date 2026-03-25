@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
+import { speakWithFallback } from '../utils/speech';
 
 const getFlag = (locale) => {
   if (!locale) return '🌐';
@@ -123,10 +124,9 @@ export default function VoiceStudio() {
     } catch (e) {
       if (e.response?.data?.fallback) {
         toast('Using browser fallback (Murf API key missing)', { icon: 'ℹ️' });
-        const u = new SpeechSynthesisUtterance(text);
-        u.pitch = 1 + (pitch / 100);
-        u.rate = 1 + (speed / 100);
-        window.speechSynthesis.speak(u);
+        // Use the locale from the selected voice object
+        const langCode = voice?.locale?.split('-')[0] || 'en';
+        speakWithFallback(text, langCode);
         
         // Mock save for fallback
         setProjects(prev => [{

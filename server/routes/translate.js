@@ -6,7 +6,10 @@ const pdf = require('pdf-parse');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { OpenAI } = require('openai');
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 } // 15MB
+});
 
 // Helper for MyMemory Chunking (Free tier limit is usually 500 chars)
 async function translateWithMyMemory(text, pair) {
@@ -23,7 +26,15 @@ async function translateWithMyMemory(text, pair) {
 
 // Translation via Google Translate API
 router.post('/', async (req, res) => {
-  const { text, sourceLang = 'auto', targetLang = 'hi' } = req.body;
+  let { text, sourceLang = 'auto', targetLang = 'hi' } = req.body;
+  if (!text) return res.status(400).json({ error: 'No text provided' });
+
+  // Safety: Truncate very large text for the translation API (limit 5000 chars)
+  const isTruncated = text.length > 5000;
+  if (isTruncated) {
+    text = text.substring(0, 5000);
+  }
+
   const pair = sourceLang === 'auto' ? `en|${targetLang}` : `${sourceLang}|${targetLang}`;
 
   if (!process.env.GOOGLE_TRANSLATE_API_KEY || process.env.GOOGLE_TRANSLATE_API_KEY.includes('your_')) {
@@ -65,7 +76,11 @@ router.post('/process-file', upload.single('file'), async (req, res) => {
       extractedText = req.file.buffer.toString('utf-8');
     }
 
-    res.json({ text: extractedText });
+    if (!extractedText || extractedText.trim().length === 0) {
+      return res.status(400).json({ error: 'Could not extract any text from the file.' });
+    }
+
+    res.json({ text: extractedText.trim() });
   } catch (err) {
     res.status(500).json({ error: 'Failed to process file' });
   }
@@ -130,6 +145,16 @@ router.post('/summarize', async (req, res) => {
 // Murf Audio Generation with Language Mapping & Style Validation
 router.post('/generate-audio', async (req, res) => {
   const { text, language = 'en' } = req.body;
+  
+  // Murf doesn't support Telugu for most basic API keys, and our check showed it's missing.
+  // We force browser fallback for Telugu to ensure a smooth user experience.
+  if (language === 'te') {
+    return res.status(400).json({ 
+      error: 'Telugu voice requires browser fallback for high quality.', 
+      fallback: 'browser' 
+    });
+  }
+
   if (!process.env.MURF_API_KEY) return res.status(400).json({ error: 'Murf API key missing', fallback: 'browser' });
 
   // Validated Voice Mapping (Confirmed via API checks)

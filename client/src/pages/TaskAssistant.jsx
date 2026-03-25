@@ -3,6 +3,7 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { io } from 'socket.io-client';
+import { speakWithFallback } from '../utils/speech';
 
 export default function TaskAssistant() {
   const [tasks, setTasks] = useState([]);
@@ -21,8 +22,7 @@ export default function TaskAssistant() {
     const socket = io('http://localhost:5000');
     socket.on('reminder', ({ task }) => {
       toast('Reminder: ' + task.title, { icon: '⏰', duration: 10000 });
-      const u = new SpeechSynthesisUtterance('Reminder: ' + task.title);
-      window.speechSynthesis.speak(u);
+      speakWithFallback('Reminder: ' + task.title, 'en');
       fetchTasks();
     });
     return () => socket.disconnect();
